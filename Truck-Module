@@ -1,0 +1,288 @@
+local module = {}
+module.__index = module
+
+local TweenService = game:GetService("TweenService")
+local CS = game:GetService("CollectionService")
+
+--Base Car Stats if server didnt mark
+module.Config = {
+	BaseSpeed = 90,
+	Speed = 90,
+	Angle = 70,
+
+	DamageMultiplier = 1.25,
+	MinHitSpeed = 40,
+	MaxDamage = 100,
+
+	TireMarkLifetime = 2,
+}
+
+local function GetCarSpeed(model)
+	local root = model and model.PrimaryPart
+	if not root then return 0 end
+	return root.AssemblyLinearVelocity.Magnitude
+end
+
+local function CalculateDamage(speed, config)
+	return math.clamp(speed * config.DamageMultiplier, 30, config.MaxDamage)
+end
+
+local function IsValidTarget(model, selfModel)
+	if not model or model == selfModel then return false end
+	if not model:FindFirstChildOfClass("Humanoid") then return false end
+	return true
+end
+
+local function GetWheelParts(model)
+	local wheels = {}
+	for _, v in ipairs(model:GetDescendants()) do
+		if v:IsA("BasePart") and v.Name:lower():find("wheel") then
+			table.insert(wheels, v)
+		end
+	end
+	return wheels
+end
+
+local function CreateTireMark(position, normal, lifetime)
+	local mark = Instance.new("Part")
+	mark.Size = Vector3.new(0.3, 0.05, 1.2)
+	mark.Anchored = true
+	mark.CanCollide = false
+	mark.Material = Enum.Material.SmoothPlastic
+	mark.Color = Color3.fromRGB(20, 20, 20)
+	mark.Transparency = 0.2
+
+	local cf = CFrame.new(position, position + normal) * CFrame.Angles(math.rad(90), 0, 0)
+	mark.CFrame = cf
+	mark.Parent = workspace
+
+	local tween = TweenService:Create(
+		mark,
+		TweenInfo.new(lifetime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{Transparency = 1}
+	)
+
+	tween:Play()
+	tween.Completed:Connect(function()
+		mark:Destroy()
+	end)
+end
+
+local function GetModelMass(model)
+	local mass = 0
+	for _, v in ipairs(model:GetDescendants()) do
+		if v:IsA("BasePart") then
+			mass += v.AssemblyMass
+		end
+	end
+	return mass
+end
+
+local function GetMassMultiplier(model)
+	local mass = GetModelMass(model)
+	local minMass = 500
+	local maxMass = 2000
+	local t = math.clamp((mass - minMass) / (maxMass - minMass), 0, 1)
+	return 0.3 + t * 1.7
+end
+
+local function GetThrottleHinges(model)
+	local list = {}
+	for _, v in ipairs(model:GetDescendants()) do
+		if v:IsA("HingeConstraint") and v.Name:find("Rotate") then
+			table.insert(list, v)
+		end
+	end
+	return list
+end
+
+local function GetSteerHinges(model)
+	local list = {}
+	for _, v in ipairs(model:GetDescendants()) do
+		if v:IsA("HingeConstraint") and v.Name == "SteerWheel" then
+			table.insert(list, v)
+		end
+	end
+	return list
+end
+
+local function FindHitbox(model)
+	local hit1, hit2
+	for _, v in ipairs(model:GetDescendants()) do
+		if v:IsA("BasePart") then
+			if CS:HasTag(v, "HitboxKill") then
+				hit1 = v
+			elseif CS:HasTag(v, "HitboxSpawn") then
+				hit2 = v
+			end
+		end
+	end
+	return hit1, hit2
+end
+
+function module.new(model)
+	local self = setmetatable({}, module)
+
+	self.Model = model
+	self.Config = table.clone(module.Config)
+
+	self.ThrottleHinges = GetThrottleHinges(model)
+	self.SteerHinges = GetSteerHinges(model)
+	self.WheelParts = GetWheelParts(model)
+
+	self.Hitbox, self.Hitbox2 = FindHitbox(model)
+	self.Debounce = {}
+
+	self.LastMarkTime = 0
+	self.MARK_COOLDOWN = 0.08
+
+	model.PrimaryPart = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+
+	if self.Hitbox then
+		self.Hitbox.Touched:Connect(function(part)
+			self:OnHit(part)
+		end)
+	end
+
+	return self
+end
+
+function module:SetStats(stats)
+	self.Config = table.clone(module.Config)
+
+	for k, v in pairs(stats) do
+		self.Config[k] = v
+	end
+end
+
+function module:EmitWheelMarks()
+	if tick() - self.LastMarkTime < self.MARK_COOLDOWN then return end
+	self.LastMarkTime = tick()
+
+	for _, wheel in ipairs(self.WheelParts) do
+		local origin = wheel.Position
+		local dir = Vector3.new(0, -3, 0)
+
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = {wheel.Parent}
+
+		local result = workspace:Raycast(origin, dir, params)
+
+		if result then
+			CreateTireMark(result.Position, result.Normal, self.Config.TireMarkLifetime)
+		end
+	end
+end
+
+function module:OnHit(part)
+	if not part or not part.Parent then return end
+
+	local car = self.Model.Parent
+	if not car or not car:GetAttribute("HasDriver") then return end
+
+	local model = part:FindFirstAncestorOfClass("Model")
+	if not IsValidTarget(model, self.Model) then return end
+
+	if self.Debounce[model] then return end
+	self.Debounce[model] = true
+
+	local speed = GetCarSpeed(self.Model)
+	if speed < self.Config.MinHitSpeed then
+		self.Debounce[model] = nil
+		return
+	end
+
+	local damage = CalculateDamage(speed, self.Config)
+
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if hum then
+		local hrp = model:FindFirstChild("HumanoidRootPart") 
+			or model:FindFirstChild("Torso") 
+			or model:FindFirstChild("UpperTorso")
+
+		if hrp then
+			hum:TakeDamage(damage)
+
+			local carRoot = self.Model.PrimaryPart
+			if carRoot then
+				local direction = (hrp.Position - carRoot.Position).Unit
+				local power = GetCarSpeed(self.Model) * 5
+
+				local impulse = direction * power * hrp.AssemblyMass
+				hrp:ApplyImpulse(impulse)
+			end
+		end
+	end
+
+	task.delay(1, function()
+		self.Debounce[model] = nil
+	end)
+end
+
+function module:CheckHitboxSlowdown()
+	if not self.Hitbox2 then return end
+
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = {self.Model}
+
+	local parts = workspace:GetPartBoundsInBox(
+		self.Hitbox2.CFrame,
+		self.Hitbox2.Size,
+		params
+	)
+
+	local totalMass = 0
+
+	for _, obj in ipairs(parts) do
+		if obj:IsA("BasePart") and not obj.Massless then	
+			local mass = obj:GetMass()
+			if mass > 0 then
+				totalMass += mass
+			end
+		end
+	end
+
+	local slowdownPerMass = 0.1
+	local newSpeed = self.Config.BaseSpeed - totalMass * slowdownPerMass
+
+	self.Config.Speed = math.clamp(newSpeed, self.Config.BaseSpeed * 0.3, self.Config.BaseSpeed)
+end
+
+function module:Drive(val, state)
+	if state == "Forward" then
+		for _, h in ipairs(self.ThrottleHinges) do
+			if CS:HasTag(h, "LeftRotateWheel") then
+				h.AngularVelocity = val * self.Config.Speed
+			elseif CS:HasTag(h, "RightRotateWheel") then
+				h.AngularVelocity = -val * self.Config.Speed
+			else
+				warn("?")
+			end
+		end
+
+	elseif state == "Turn" then
+		for _, h in ipairs(self.SteerHinges) do
+			h.TargetAngle = -val * self.Config.Angle
+		end
+	end
+
+	self:EmitWheelMarks()
+end
+
+function module:Stop()
+	for _, h in ipairs(self.ThrottleHinges) do
+		h.AngularVelocity = 0
+	end
+	for _, h in ipairs(self.SteerHinges) do
+		h.TargetAngle = 0
+	end
+	self.Config.Speed = self.Config.BaseSpeed
+end
+
+function module:UpdatePhysics()
+	self:CheckHitboxSlowdown()
+end
+
+return module
