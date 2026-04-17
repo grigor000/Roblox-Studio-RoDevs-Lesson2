@@ -1,0 +1,48 @@
+local VehicleSeat = script.Parent
+local Car = VehicleSeat.Parent
+local Mockup = Car:WaitForChild("Mockup")
+
+local Module = require(game:GetService("ReplicatedStorage"):WaitForChild("TruckService"))
+
+local Driver = nil
+local Truck = Module.new(Mockup)
+
+Truck:SetStats({
+	BaseSpeed = 30,
+	Speed = 30,
+	Angle = 30,
+	DamageMultiplier = 2,
+	MinHitSpeed = 20,
+	MaxDamage = 100,
+
+	TireMarkLifetime = 2,
+})
+
+VehicleSeat:GetPropertyChangedSignal("Occupant"):Connect(function()
+	local hum = VehicleSeat.Occupant
+
+	if hum then
+		local char = hum.Parent
+		Driver = game.Players:GetPlayerFromCharacter(char)
+		Car:SetAttribute("HasDriver", true)
+	else
+		Car:SetAttribute("HasDriver", false)
+		Driver = nil
+	end
+end)
+
+Car:GetAttributeChangedSignal("Driver"):Connect(function()
+	if not Car:GetAttribute("HasDriver") then
+		Truck:Stop()
+	end
+end)
+
+game:GetService("RunService").Heartbeat:Connect(function()
+	if not Driver then return end
+	if not VehicleSeat or not VehicleSeat.Parent then return end
+
+	Truck:Drive(VehicleSeat.Throttle, "Forward")
+	Truck:Drive(VehicleSeat.Steer, "Turn")
+
+	Truck:UpdatePhysics()
+end)
